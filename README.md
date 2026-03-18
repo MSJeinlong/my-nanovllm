@@ -1,34 +1,21 @@
-<p align="center">
-<img width="300" src="assets/logo.png">
-</p>
+# My Nano-vLLM
 
-<p align="center">
-<a href="https://trendshift.io/repositories/15323" target="_blank"><img src="https://trendshift.io/api/badge/repositories/15323" alt="GeeeekExplorer%2Fnano-vllm | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
-</p>
+基于官方nano-vllm实现，添加了一些优化，用于学习大模型推理引擎的实现原理。注意，本代码仅适合学习和研究，不建议在生产环境中使用。
 
-# Nano-vLLM
+## 功能特点
+* 支持fused-moe
 
-A lightweight vLLM implementation built from scratch.
-
-## Key Features
-
-* 🚀 **Fast offline inference** - Comparable inference speeds to vLLM
-* 📖 **Readable codebase** - Clean implementation in ~ 1,200 lines of Python code
-* ⚡ **Optimization Suite** - Prefix caching, Tensor Parallelism, Torch compilation, CUDA graph, etc.
-
-## Installation
+## 安装
 
 ```bash
-pip install git+https://github.com/GeeeekExplorer/nano-vllm.git
+pip install git+https://github.com/MSJeinlong/my-nanovllm.git
 ```
 
-## Model Download
-
-To download the model weights manually, use the following command:
+## 模型下载
+建议从魔塔下载模型权重，因为模型权重较大，直接从huggingface下载会比较慢。
 ```bash
-huggingface-cli download --resume-download Qwen/Qwen3-0.6B \
-  --local-dir ~/huggingface/Qwen3-0.6B/ \
-  --local-dir-use-symlinks False
+pip install modelscope
+modelscope download --model Qwen/Qwen3.5-27B --local_dir ./dir
 ```
 
 ## Quick Start
@@ -61,6 +48,3 @@ See `bench.py` for benchmark.
 | Nano-vLLM      | 133,966     | 93.41    | 1434.13               |
 
 
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=GeeeekExplorer/nano-vllm&type=Date)](https://www.star-history.com/#GeeeekExplorer/nano-vllm&Date)
