@@ -120,7 +120,7 @@ class BlockManager:
         self.used_block_ids.add(block_id)
         return self.blocks[block_id]
 
-    def _deallocate_block(self, block_id: int) -> Block:
+    def _deallocate_block(self, block_id: int):
         """释放一个块
         
         将块从已使用块集合中移除，添加到空闲块列表。
@@ -222,8 +222,15 @@ class BlockManager:
         seq.block_table.clear()
 
     def can_append(self, seq: Sequence) -> bool:
-        """检查是否可以为序列追加一个token
-        
+        """检查是否可以为序列追加一个token。
+        为什么需要追加一个token？原因如下：
+        - 模型接收输入序列（提示词）
+        - 每次生成一个新token
+        - 将新token追加到输入序列末尾
+        - 用更新后的序列作为下一次生成的输入
+        - 重复此过程直到生成结束符或达到最大长度
+        - 因此，序列长度会逐个token递增。
+
         当序列长度模块大小等于1时，需要分配新块。
         
         Args:
@@ -232,6 +239,8 @@ class BlockManager:
         Returns:
             是否可以追加
         """
+        # 当需要分配新块时（len(seq) % self.block_size == 1），需要至少1个空闲块
+        # 其他情况不需要新块，直接返回True
         return len(self.free_block_ids) >= (len(seq) % self.block_size == 1)
 
     def may_append(self, seq: Sequence):

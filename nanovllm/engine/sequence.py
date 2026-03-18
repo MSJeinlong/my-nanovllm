@@ -39,7 +39,7 @@ class Sequence:
         self.last_token = token_ids[-1]
         # token数
         self.num_tokens = len(self.token_ids)
-        # 提示token数
+        # 提示词token数
         self.num_prompt_tokens = len(token_ids)
         # 缓存的token数
         self.num_cached_tokens = 0
@@ -91,10 +91,10 @@ class Sequence:
 
     @property
     def prompt_token_ids(self):
-        """获取提示的token ID列表
+        """获取提示词的token ID列表
         
         Returns:
-            提示的token ID列表
+            提示词的token ID列表
         """
         return self.token_ids[:self.num_prompt_tokens]
 
