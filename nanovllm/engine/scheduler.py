@@ -92,7 +92,7 @@ class Scheduler:
             else:
                 # 如果可以追加token，则调度该序列
                 num_seqs += 1
-                # 处理追加
+                # 处理追加token
                 self.block_manager.may_append(seq)
                 # 添加到调度列表
                 scheduled_seqs.append(seq)
@@ -132,3 +132,13 @@ class Scheduler:
                 self.block_manager.deallocate(seq)
                 # 从运行队列中移除
                 self.running.remove(seq)
+
+
+"""
+## 代码优化建议
+1. 错误处理 ：添加更完善的错误处理机制，如队列操作的边界检查
+2. 性能优化 ：考虑使用更高效的数据结构或算法，如优先队列来管理序列
+3. 可配置性 ：增加更多的配置选项，如抢占策略的调整
+4. 监控和统计 ：添加监控和统计功能，跟踪调度性能和资源使用情况
+5. 文档完善 ：增加更详细的文档，说明调度策略和参数调整建议
+"""
