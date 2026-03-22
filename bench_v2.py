@@ -9,18 +9,13 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional
 from datetime import datetime
 
-# 尝试导入 nano-vllm 和 vllm
-try:
-    from nanovllm import LLM as NanoLLM, SamplingParams
-    NANO_AVAILABLE = True
-except ImportError:
-    NANO_AVAILABLE = False
-
-try:
-    from vllm import LLM as VLLM, SamplingParams as VLLMSamplingParams
-    VLLM_AVAILABLE = True
-except ImportError:
-    VLLM_AVAILABLE = False
+# 全局变量
+NanoLLM = None
+VLLM = None
+SamplingParams = None
+VLLMSamplingParams = None
+NANO_AVAILABLE = False
+VLLM_AVAILABLE = False
 
 @dataclass
 class RequestMetrics:
@@ -62,16 +57,27 @@ class LLMPerformanceTester:
     
     def _init_model(self):
         """初始化模型"""
+        global NanoLLM, VLLM, SamplingParams, VLLMSamplingParams, NANO_AVAILABLE, VLLM_AVAILABLE
+        
         if self.engine == "nano-vllm":
-            if not NANO_AVAILABLE:
-                raise ImportError("nano-vllm is not available. Please install it first.")
-            print(f"Initializing nano-vllm with model: {self.model_path}")
-            self.llm = NanoLLM(self.model_path, enforce_eager=False, max_model_len=self.max_model_len)
+            try:
+                from nanovllm import LLM as NanoLLM, SamplingParams
+                NANO_AVAILABLE = True
+                print(f"Initializing nano-vllm with model: {self.model_path}")
+                self.llm = NanoLLM(self.model_path, enforce_eager=False, max_model_len=self.max_model_len)
+            except ImportError as e:
+                raise ImportError("nano-vllm is not available. Please install it first.") from e
         elif self.engine == "vllm":
-            if not VLLM_AVAILABLE:
-                raise ImportError("vllm is not available. Please install it first.")
-            print(f"Initializing vllm with model: {self.model_path}")
-            self.llm = VLLM(self.model_path, max_model_len=self.max_model_len, gpu_memory_utilization=0.7)
+            try:
+                from vllm import LLM as VLLM, SamplingParams as VLLMSamplingParams
+                VLLM_AVAILABLE = True
+                # 对于vllm，使用VLLMSamplingParams
+                global SamplingParams
+                SamplingParams = VLLMSamplingParams
+                print(f"Initializing vllm with model: {self.model_path}")
+                self.llm = VLLM(self.model_path, max_model_len=self.max_model_len, gpu_memory_utilization=0.7)
+            except ImportError as e:
+                raise ImportError("vllm is not available. Please install it first.") from e
         else:
             raise ValueError(f"Unsupported engine: {self.engine}")
     
