@@ -75,8 +75,7 @@ class Qwen3Attention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position,
-            base=rope_theta,
-            rope_scaling=rope_scaling,
+            base=rope_theta
         )
         # 注意力模块
         self.attn = Attention(
