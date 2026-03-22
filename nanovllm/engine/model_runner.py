@@ -43,7 +43,7 @@ class ModelRunner:
         # 保存默认数据类型
         default_dtype = torch.get_default_dtype()
         # 设置默认数据类型为模型的数据类型
-        torch.set_default_dtype(hf_config.torch_dtype)
+        torch.set_default_dtype(hf_config.dtype)
         # 设置默认设备为CUDA
         torch.set_default_device("cuda")
         # 创建模型
@@ -194,7 +194,7 @@ class ModelRunner:
         # 计算头维度
         head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
         # 计算每个块的字节数
-        block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * hf_config.torch_dtype.itemsize
+        block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * hf_config.dtype.itemsize
         # 计算KV缓存块数
         config.num_kvcache_blocks = int(total * config.gpu_memory_utilization - used - peak + current) // block_bytes
         assert config.num_kvcache_blocks > 0
