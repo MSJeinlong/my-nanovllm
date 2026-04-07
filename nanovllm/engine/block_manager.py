@@ -3,6 +3,7 @@ import xxhash
 import numpy as np
 
 from nanovllm.engine.sequence import Sequence
+from nanovllm.utils.monitor import monitor
 
 
 class Block:
@@ -61,21 +62,19 @@ class BlockManager:
 
     def __init__(self, num_blocks: int, block_size: int):
         """初始化BlockManager对象
-        
+
         Args:
             num_blocks: 总块数
             block_size: 每个块的大小（token数量）
         """
-        # 每个块的大小
         self.block_size = block_size
-        # 块列表，存储所有的Block对象
         self.blocks: list[Block] = [Block(i) for i in range(num_blocks)]
-        # 哈希值到块ID的映射，用于快速查找相同内容的块
         self.hash_to_block_id: dict[int, int] = dict()
-        # 空闲块ID队列，用于快速获取可用块
         self.free_block_ids: deque[int] = deque(range(num_blocks))
-        # 已使用块ID集合，用于快速判断块是否被使用
         self.used_block_ids: set[int] = set()
+        self.total_blocks = num_blocks
+
+        monitor.info(f"[BlockManager] 初始化块管理器 - num_blocks={num_blocks}, block_size={block_size}")
 
     @classmethod
     def compute_hash(cls, token_ids: list[int], prefix: int = -1):
@@ -122,9 +121,9 @@ class BlockManager:
 
     def _deallocate_block(self, block_id: int):
         """释放一个块
-        
+
         将块从已使用块集合中移除，添加到空闲块列表。
-        
+
         Args:
             block_id: 要释放的块ID
         """
@@ -134,6 +133,24 @@ class BlockManager:
         self.used_block_ids.remove(block_id)
         # 添加到空闲块列表
         self.free_block_ids.append(block_id)
+
+    def get_used_blocks(self):
+        """获取已使用的块数
+
+        Returns:
+            int: 已使用的块数
+        """
+        return len(self.used_block_ids)
+
+    def get_cache_utilization(self):
+        """获取缓存利用率
+
+        Returns:
+            float: 缓存利用率（已用块数/总块数）
+        """
+        if self.total_blocks == 0:
+            return 0.0
+        return self.get_used_blocks() / self.total_blocks
 
     def can_allocate(self, seq: Sequence) -> bool:
         """检查是否有足够的空闲块来分配给序列
@@ -148,78 +165,96 @@ class BlockManager:
 
     def allocate(self, seq: Sequence):
         """为序列分配块
+
+        为序列分配KV缓存块并构建块表（block_table），支持缓存命中和缓存未命中两种情况。
+        核心功能包括：
         
-        为序列分配块并构建块表（block_table），支持缓存命中和缓存未命中两种情况。
+        1. **缓存命中检测**：通过哈希值快速查找相同内容的块
+        2. **块分配**：缓存命中时复用现有块，缓存未命中时分配新块
+        3. **引用计数**：缓存命中时增加块的引用计数
+        4. **块表构建**：为序列创建块表，记录使用的块ID
         
+        哈希计算使用链式哈希策略，每个块的哈希值都基于前一个块的哈希值，
+        这样可以快速识别重复的token序列前缀。
+
         Args:
             seq: 要分配块的序列
         """
-        # 确保序列当前没有块表
-        assert not seq.block_table
-        # 哈希值，用于链式哈希计算
+        assert not seq.block_table, "序列已分配块表"
         h = -1
-        # 缓存未命中标志
         cache_miss = False
-        
-        # 遍历序列的每个块
+        cache_hits = 0
+
+        monitor.start_timer(f"allocate_seq_{seq.seq_id}")
+
         for i in range(seq.num_blocks):
-            # 获取当前块的token ID列表
             token_ids = seq.block(i)
-            # 计算哈希值（如果是完整块）
             h = self.compute_hash(token_ids, h) if len(token_ids) == self.block_size else -1
-            # 尝试通过哈希值查找块
             block_id = self.hash_to_block_id.get(h, -1)
-            
+
             # 检查是否缓存未命中
             if block_id == -1 or self.blocks[block_id].token_ids != token_ids:
                 cache_miss = True
-            
+            else:
+                cache_hits += 1
+
             # 处理缓存未命中
             if cache_miss:
-                # 获取第一个空闲块
                 block_id = self.free_block_ids[0]
-                # 分配块
                 block = self._allocate_block(block_id)
             else:
-                # 缓存命中，增加缓存token计数
                 seq.num_cached_tokens += self.block_size
-                # 如果块已被使用，增加引用计数
                 if block_id in self.used_block_ids:
                     block = self.blocks[block_id]
                     block.ref_count += 1
                 else:
-                    # 块未被使用，分配块
                     block = self._allocate_block(block_id)
-            
-            # 更新块的哈希值和token ID列表（如果是完整块）
+
             if h != -1:
                 block.update(h, token_ids)
-                # 更新哈希到块ID的映射
                 self.hash_to_block_id[h] = block_id
-            
-            # 将块ID添加到序列的块表
+
             seq.block_table.append(block_id)
+
+        allocate_time = monitor.end_timer(f"allocate_seq_{seq.seq_id}")
+        cache_hit_rate = cache_hits / seq.num_blocks if seq.num_blocks > 0 else 0
+        # 记录缓存使用情况
+        used_blocks = self.get_used_blocks()
+        utilization = self.get_cache_utilization()
+        monitor.debug(f"[BlockManager] 分配完成 - seq_id={seq.seq_id}, blocks={len(seq.block_table)}, "
+                     f"cached_tokens={seq.num_cached_tokens}, cache_hits={cache_hits}, "
+                     f"cache_hit_rate={cache_hit_rate:.2f}, time={allocate_time:.4f}s")
+        monitor.debug(f"[BlockManager] 缓存状态 - used_blocks={used_blocks}, total_blocks={self.total_blocks}, "
+                    f"utilization={utilization * 100:.2f}%")
 
     def deallocate(self, seq: Sequence):
         """释放序列使用的块
-        
+
         遍历序列的块表，减少每个块的引用计数，当引用计数为0时释放块。
-        
+
         Args:
             seq: 要释放块的序列
         """
-        # 反向遍历块表，确保正确处理引用计数
+        num_blocks = len(seq.block_table)
+        freed_blocks = 0
+
         for block_id in reversed(seq.block_table):
             block = self.blocks[block_id]
-            # 减少引用计数
             block.ref_count -= 1
-            # 如果引用计数为0，释放块
             if block.ref_count == 0:
                 self._deallocate_block(block_id)
-        # 重置序列的缓存token计数
+                freed_blocks += 1
+
         seq.num_cached_tokens = 0
-        # 清空序列的块表
         seq.block_table.clear()
+
+        # 记录缓存使用情况
+        used_blocks = self.get_used_blocks()
+        utilization = self.get_cache_utilization()
+        monitor.debug(f"[BlockManager] 释放完成 - seq_id={seq.seq_id}, blocks_freed={freed_blocks}, "
+                     f"free_blocks={len(self.free_block_ids)}")
+        monitor.debug(f"[BlockManager] 缓存状态 - used_blocks={used_blocks}, total_blocks={self.total_blocks}, "
+                    f"utilization={utilization * 100:.2f}%")
 
     def can_append(self, seq: Sequence) -> bool:
         """检查是否可以为序列追加一个token。

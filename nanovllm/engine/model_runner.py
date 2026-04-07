@@ -10,6 +10,7 @@ from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.layers.sampler import Sampler
 from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
+from nanovllm.utils.monitor import monitor
 
 
 class ModelRunner:
@@ -17,7 +18,7 @@ class ModelRunner:
 
     def __init__(self, config: Config, rank: int, event: Event | list[Event]):
         """初始化ModelRunner对象
-        
+
         Args:
             config: 配置对象
             rank: 当前进程的排名
@@ -25,58 +26,73 @@ class ModelRunner:
         """
         self.config = config
         hf_config = config.hf_config
-        # KV缓存的块大小
         self.block_size = config.kvcache_block_size
-        # 是否强制使用eager模式
         self.enforce_eager = config.enforce_eager
-        # 张量并行大小
         self.world_size = config.tensor_parallel_size
-        # 当前进程的排名
         self.rank = rank
-        # 事件对象或事件对象列表
         self.event = event
 
+        monitor.info(f"[ModelRunner] 初始化进程 rank={rank}, world_size={self.world_size}")
+        monitor.start_timer(f"model_runner_init_rank{rank}")
+
         # 初始化分布式进程组
+        monitor.debug(f"[ModelRunner] rank={rank} 初始化NCCL进程组")
         dist.init_process_group("nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank)
-        # 设置CUDA设备
         torch.cuda.set_device(rank)
-        # 保存默认数据类型
+        monitor.debug(f"[ModelRunner] rank={rank} 设置CUDA设备: {rank}")
+
+        # 保存并设置默认数据类型和设备
         default_dtype = torch.get_default_dtype()
-        # 设置默认数据类型为模型的数据类型
         torch.set_default_dtype(hf_config.dtype)
-        # 设置默认设备为CUDA
         torch.set_default_device("cuda")
+
         # 创建模型
+        monitor.info(f"[ModelRunner] rank={rank} 创建模型")
         self.model = Qwen3ForCausalLM(hf_config)
+
         # 加载模型权重
+        monitor.info(f"[ModelRunner] rank={rank} 加载模型权重: {config.model}")
+        monitor.start_timer(f"load_model_rank{rank}")
         load_model(self.model, config.model)
+        load_time = monitor.end_timer(f"load_model_rank{rank}")
+        monitor.info(f"[ModelRunner] rank={rank} 模型加载完成，耗时: {load_time:.3f}s")
+
         # 创建采样器
         self.sampler = Sampler()
+
         # 预热模型
+        monitor.info(f"[ModelRunner] rank={rank} 开始模型预热")
         self.warmup_model()
+        monitor.info(f"[ModelRunner] rank={rank} 模型预热完成")
+
         # 分配KV缓存
+        monitor.info(f"[ModelRunner] rank={rank} 分配KV缓存")
         self.allocate_kv_cache()
-        # 如果不强制使用eager模式，则捕获CUDA图
+
+        # 捕获CUDA图
         if not self.enforce_eager:
+            monitor.info(f"[ModelRunner] rank={rank} 捕获CUDA图")
             self.capture_cudagraph()
-        # 恢复默认设备为CPU
+            monitor.info(f"[ModelRunner] rank={rank} CUDA图捕获完成")
+
+        # 恢复默认设置
         torch.set_default_device("cpu")
-        # 恢复默认数据类型
         torch.set_default_dtype(default_dtype)
 
-        # 如果使用张量并行
+        init_time = monitor.end_timer(f"model_runner_init_rank{rank}")
+        monitor.info(f"[ModelRunner] rank={rank} 初始化完成，总耗时: {init_time:.3f}s")
+        monitor.record_memory(f"model_runner_init_rank{rank}")
+
+        # 张量并行设置
         if self.world_size > 1:
             if rank == 0:
-                # 创建共享内存
+                monitor.info(f"[ModelRunner] rank=0 创建共享内存")
                 self.shm = SharedMemory(name="nanovllm", create=True, size=2**20)
-                # 等待所有进程
                 dist.barrier()
             else:
-                # 等待所有进程
                 dist.barrier()
-                # 连接到共享内存
+                monitor.debug(f"[ModelRunner] rank={rank} 连接到共享内存")
                 self.shm = SharedMemory(name="nanovllm")
-                # 进入循环
                 self.loop()
 
     def exit(self):
@@ -181,32 +197,48 @@ class ModelRunner:
 
     def allocate_kv_cache(self):
         """分配KV缓存"""
+
         config = self.config
         hf_config = config.hf_config
-        # 获取CUDA内存信息
-        free, total = torch.cuda.mem_get_info()
-        used = total - free
-        # 获取内存统计信息
-        peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
-        current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
-        # 计算KV头数
+
+        # 计算KV缓存参数
         num_kv_heads = hf_config.num_key_value_heads // self.world_size
-        # 计算头维度
         head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
-        # 计算每个块的字节数
         block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * hf_config.dtype.itemsize
-        # 计算KV缓存块数
-        config.num_kvcache_blocks = int(total * config.gpu_memory_utilization - used - peak + current) // block_bytes
-        assert config.num_kvcache_blocks > 0
+
+        if config.num_kvcache_blocks > 0:
+            monitor.info(f"[ModelRunner] rank={self.rank} KV缓存分配 - "
+                        f"blocks={config.num_kvcache_blocks}, block_size={self.block_size}, ")
+        else:
+            # num_kvcache_blocks=-1，根据GPU内存自动分配
+            # 获取CUDA内存信息
+            free, total = torch.cuda.mem_get_info()
+            used = total - free
+            peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
+            current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
+
+            # 计算KV缓存块数
+            available_memory = int(total * config.gpu_memory_utilization - used - peak + current)
+            config.num_kvcache_blocks = available_memory // block_bytes
+
+            monitor.info(f"[ModelRunner] rank={self.rank} KV缓存分配 - "
+                        f"blocks={config.num_kvcache_blocks}, block_size={self.block_size}, "
+                        f"num_layers={hf_config.num_hidden_layers}, num_kv_heads={num_kv_heads}, head_dim={head_dim}")
+            monitor.debug(f"[ModelRunner] rank={self.rank} GPU内存 - total={total/1024**3:.2f}GB, "
+                        f"available={available_memory/1024**3:.2f}GB, block_bytes={block_bytes}")
+
+        assert config.num_kvcache_blocks > 0, "KV缓存块数必须大于0"
+
         # 创建KV缓存
         self.kv_cache = torch.empty(2, hf_config.num_hidden_layers, config.num_kvcache_blocks, self.block_size, num_kv_heads, head_dim)
         layer_id = 0
-        # 为每个层分配KV缓存
         for module in self.model.modules():
             if hasattr(module, "k_cache") and hasattr(module, "v_cache"):
                 module.k_cache = self.kv_cache[0, layer_id]
                 module.v_cache = self.kv_cache[1, layer_id]
                 layer_id += 1
+
+        monitor.debug(f"[ModelRunner] rank={self.rank} KV缓存分配完成，共 {layer_id} 层")
 
     def prepare_block_tables(self, seqs: list[Sequence]):
         """准备块表
@@ -376,24 +408,51 @@ class ModelRunner:
 
     def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
         """运行模型并返回生成的token ID
-        
+
         Args:
             seqs: 序列列表
             is_prefill: 是否为prefill阶段
-            
+
         Returns:
             生成的token ID列表
         """
+        stage = "prefill" if is_prefill else "decode"
+        total_tokens = sum(len(seq) for seq in seqs) if is_prefill else len(seqs)
+
+        monitor.start_timer(f"run_{stage}")
+        monitor.debug(f"[ModelRunner] rank={self.rank} 开始{stage} - seqs={len(seqs)}, tokens={total_tokens}")
+
         # 准备数据
+        monitor.start_timer(f"prepare_{stage}")
         input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
-        # 准备采样数据（仅主进程）
+        prep_time = monitor.end_timer(f"prepare_{stage}")
+        monitor.debug(f"[ModelRunner] rank={self.rank} 数据准备完成 - time={prep_time:.4f}s, input_ids_shape={input_ids.shape}")
+
+        # 准备采样数据
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
+
         # 运行模型
+        monitor.start_timer(f"model_forward_{stage}")
         logits = self.run_model(input_ids, positions, is_prefill)
-        # 采样（仅主进程）
-        token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
+        forward_time = monitor.end_timer(f"model_forward_{stage}")
+        monitor.debug(f"[ModelRunner] rank={self.rank} 模型前向完成 - time={forward_time:.4f}s, logits_shape={logits.shape}")
+
+        # 采样
+        if self.rank == 0:
+            monitor.start_timer("sampling")
+            token_ids = self.sampler(logits, temperatures).tolist()
+            sample_time = monitor.end_timer("sampling")
+            monitor.debug(f"[ModelRunner] rank=0 采样完成 - time={sample_time:.4f}s, num_tokens={len(token_ids)}")
+        else:
+            token_ids = None
+
         # 重置上下文
         reset_context()
+
+        run_time = monitor.end_timer(f"run_{stage}")
+        monitor.increment(f"{stage}_tokens", total_tokens)
+        monitor.debug(f"[ModelRunner] rank={self.rank} {stage}完成 - total_time={run_time:.4f}s")
+
         return token_ids
 
     @torch.inference_mode()

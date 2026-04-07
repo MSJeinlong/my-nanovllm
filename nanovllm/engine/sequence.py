@@ -3,6 +3,7 @@ from enum import Enum, auto
 from itertools import count
 
 from nanovllm.sampling_params import SamplingParams
+from nanovllm.utils.monitor import monitor
 
 
 class SequenceStatus(Enum):
@@ -24,33 +25,25 @@ class Sequence:
 
     def __init__(self, token_ids: list[int], sampling_params = SamplingParams()):
         """初始化Sequence对象
-        
+
         Args:
             token_ids: token ID列表
             sampling_params: 采样参数
         """
-        # 序列ID
         self.seq_id = next(Sequence.counter)
-        # 序列状态
         self.status = SequenceStatus.WAITING
-        # token ID列表
         self.token_ids = copy(token_ids)
-        # 最后一个token
         self.last_token = token_ids[-1]
-        # token数
         self.num_tokens = len(self.token_ids)
-        # 提示词token数
         self.num_prompt_tokens = len(token_ids)
-        # 缓存的token数
         self.num_cached_tokens = 0
-        # 块表
         self.block_table = []
-        # 温度参数
         self.temperature = sampling_params.temperature
-        # 最大token数
         self.max_tokens = sampling_params.max_tokens
-        # 是否忽略结束标记
         self.ignore_eos = sampling_params.ignore_eos
+
+        monitor.debug(f"[Sequence] 创建序列 - seq_id={self.seq_id}, tokens={self.num_tokens}, "
+                     f"max_tokens={self.max_tokens}, temperature={self.temperature}")
 
     def __len__(self):
         """返回序列的token数
@@ -148,13 +141,18 @@ class Sequence:
 
     def append_token(self, token_id: int):
         """追加token
-        
+
         Args:
             token_id: 要追加的token ID
         """
         self.token_ids.append(token_id)
         self.last_token = token_id
         self.num_tokens += 1
+
+        # 只在特定间隔记录日志，避免日志过多
+        if self.num_completion_tokens % 50 == 0 or self.is_finished:
+            monitor.debug(f"[Sequence] 追加token - seq_id={self.seq_id}, "
+                         f"completion_tokens={self.num_completion_tokens}, token_id={token_id}")
 
     def __getstate__(self):
         """获取对象的状态，用于序列化

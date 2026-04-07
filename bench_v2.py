@@ -44,10 +44,12 @@ class RequestMetrics:
 class LLMPerformanceTester:
     """大模型性能测试器"""
     
-    def __init__(self, model_path, max_model_len, engine="nano-vllm"):
+    def __init__(self, model_path, max_model_len, engine="nano-vllm", log_level="INFO", preemption_mode="aggressive"):
         self.model_path = model_path
         self.max_model_len = max_model_len
         self.engine = engine
+        self.log_level = log_level
+        self.preemption_mode = preemption_mode
         self.llm = None
         self.results: List[RequestMetrics] = []
         self.lock = threading.Lock()
@@ -62,9 +64,21 @@ class LLMPerformanceTester:
         if self.engine == "nano-vllm":
             try:
                 from nanovllm import LLM as NanoLLM, SamplingParams
+                from nanovllm.utils.monitor import monitor
                 NANO_AVAILABLE = True
                 print(f"Initializing nano-vllm with model: {self.model_path}")
-                self.llm = NanoLLM(self.model_path, enforce_eager=False, max_model_len=self.max_model_len)
+                # 设置日志级别
+                log_level_map = {
+                    "DEBUG": monitor.DEBUG,
+                    "INFO": monitor.INFO,
+                    "WARNING": monitor.WARNING,
+                    "ERROR": monitor.ERROR
+                }
+                level = log_level_map.get(self.log_level.upper(), monitor.INFO)
+                monitor.set_log_level(level)
+                print(f"日志级别已设置为 {self.log_level}")
+                print(f"抢占策略已设置为 {self.preemption_mode}")
+                self.llm = NanoLLM(self.model_path, enforce_eager=False, max_model_len=self.max_model_len, preemption_mode=self.preemption_mode)
             except ImportError as e:
                 print(f"导入 nano-vllm 失败: {e}")
                 raise ImportError(f"nano-vllm is not available. Please install it first. 错误详情: {e}") from e
@@ -334,7 +348,7 @@ def main():
                         help="模型最大长度，默认为 16384")
     parser.add_argument('--engine', type=str, default="nano-vllm", choices=["nano-vllm", "vllm"],
                         help="推理架构，默认为 nano-vllm")
-    parser.add_argument('--test-mode', type=str, default="all", choices=["single", "concurrent", "stress", "all"],
+    parser.add_argument('--test-mode', type=str, default="stress", choices=["single", "concurrent", "stress", "all"],
                         help="测试模式，默认为 all")
     parser.add_argument('--num-requests', type=int, default=100,
                         help="并发测试的请求数，默认为 100")
@@ -342,6 +356,10 @@ def main():
                         help="并发数，默认为 5")
     parser.add_argument('--duration', type=int, default=60,
                         help="压力测试持续时间（秒），默认为 60")
+    parser.add_argument('--log-level', type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                        help="日志级别，默认为 INFO")
+    parser.add_argument('--preemption-mode', type=str, default="aggressive", choices=["aggressive", "conservative", "last_in"],
+                        help="抢占策略，默认为 aggressive")
     
     args = parser.parse_args()
     
@@ -350,7 +368,9 @@ def main():
         tester = LLMPerformanceTester(
             model_path=args.model_path,
             max_model_len=args.max_model_len,
-            engine=args.engine
+            engine=args.engine,
+            log_level=args.log_level,
+            preemption_mode=args.preemption_mode
         )
     except Exception as e:
         print(f"初始化测试器失败: {e}")
@@ -360,6 +380,7 @@ def main():
     print(f"模型路径: {args.model_path}")
     print(f"模型最大长度: {args.max_model_len}")
     print(f"推理架构: {args.engine}")
+    print(f"抢占策略: {args.preemption_mode}")
     
     # 生成测试数据
     seed(0)
